@@ -89,6 +89,7 @@ try {
         $suites = @(
             @('-p', 'filmcraft-audio-dsp', '-p', 'filmcraft-project', '-p', 'filmcraft-render'),
             @('-p', 'filmcraft-engine', '--lib', 'project_tools'),
+            @('-p', 'filmcraft-engine', '--lib', 'image_sequence'),
             @('-p', 'filmcraft-ui-egui', '--test', 'project_panel_ui', 'import_image_sequence')
         )
         foreach ($s in $suites) {

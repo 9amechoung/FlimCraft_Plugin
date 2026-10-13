@@ -1,0 +1,468 @@
+diff --git a/crates/engine/src/commands.rs b/crates/engine/src/commands.rs
+index ce502fce..a7b17290 100644
+--- a/crates/engine/src/commands.rs
++++ b/crates/engine/src/commands.rs
+@@ -212,6 +212,18 @@ fn fps_p(p: &Value, cmd: &str) -> Result<Option<FrameRate>> {
+     }
+     Ok(Some(r))
+ }
++/// `frameRate`: the rate an imported image sequence plays at (frames per second, e.g. 12 or
++/// 23.976). Absent is `None` (Settings ▸ Media ▸ Indeterminate Media Timebase).
++pub(crate) fn sequence_rate_p(p: &Value, cmd: &str) -> Result<Option<FrameRate>> {
++    let v = match p.get("frameRate") {
++        None | Some(Value::Null) => return Ok(None),
++        Some(v) => v,
++    };
++    match v.as_f64().or_else(|| v.as_str().and_then(|t| t.trim().trim_end_matches("df").trim_end_matches("fps").trim().parse().ok())) {
++        Some(fps) if (1.0..=240.0).contains(&fps) => Ok(Some(FrameRate::from_f64(fps))),
++        _ => Err(bad(cmd, format!("frameRate must be 1 to 240 frames per second, got {v}"))),
++    }
++}
+ pub(crate) fn bool_p(p: &Value, k: &str) -> Option<bool> {
+     p.get(k).and_then(Value::as_bool)
+ }
+@@ -617,11 +629,16 @@ pub fn import_streamed(s: &mut Session, path: &str, bin: Option<filmcraft_projec
+ }
+ 
+ /// Import the image sequence that the numbered still `path` starts (File ▸ Import with Image
+-/// Sequence): one movie item at Settings ▸ Media ▸ Indeterminate Media Timebase. Returns the item,
+-/// the frame count and the missing frame numbers (relative to the first).
+-pub fn import_image_sequence(s: &mut Session, path: &str, bin: Option<filmcraft_project::BinId>) -> Result<(ItemId, usize, Vec<usize>)> {
++/// Sequence): one movie item at `rate`, else Settings ▸ Media ▸ Indeterminate Media Timebase.
++/// Returns the item, the frame count and the missing frame numbers (relative to the first).
++pub fn import_image_sequence(
++    s: &mut Session,
++    path: &str,
++    bin: Option<filmcraft_project::BinId>,
++    rate: Option<FrameRate>,
++) -> Result<(ItemId, usize, Vec<usize>)> {
+     let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
+-    let rate = crate::settings::timebase_rate(&s.prefs.media.indeterminate_timebase);
++    let rate = rate.unwrap_or_else(|| crate::settings::timebase_rate(&s.prefs.media.indeterminate_timebase));
+     let frames = crate::media_pool::image_sequence_frames(path, &*s.services)?;
+     let missing: Vec<usize> = frames.iter().enumerate().filter(|(_, f)| f.is_none()).map(|(i, _)| i).collect();
+     let src = crate::media_pool::open_image_sequence(path, &*s.services, rate, &name)?;
+@@ -1283,6 +1300,7 @@ fn build() -> Vec<CommandSpec> {
+         ),
+         cmd!("file.import", "Import…", ["File"], Some("Cmd+I"), r#"{"paths":[str],"bin":binId?,"imageSequence":bool?,"replace":bool?}"#, always, |s, p| {
+             let bin = u64_p(p, "bin").map(filmcraft_project::BinId);
++            let rate = sequence_rate_p(p, "file.import")?;
+             let paths: Vec<String> = match p.get("paths").and_then(Value::as_array) {
+                 Some(a) => a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+                 None => str_p(p, "path").map(|x| vec![x.to_string()]).unwrap_or_default(),
+@@ -1301,11 +1319,12 @@ fn build() -> Vec<CommandSpec> {
+             let mut image_sequences = Vec::new();
+             // Image Sequence: each path is the first frame of a numbered still sequence. With
+             // Settings ▸ Media ▸ Import image sequences on, a single numbered still is detected.
++            // `frameRate` (num?, frames per second) sets the rate they play at.
+             let as_sequence = p.get("imageSequence").and_then(Value::as_bool).unwrap_or(false);
+             let detect = !as_sequence && s.prefs.media.import_image_sequences && paths.len() == 1;
+             for path in paths {
+                 if as_sequence || (detect && detect_image_sequence(s, &path)) {
+-                    match import_image_sequence(s, &path, bin) {
++                    match import_image_sequence(s, &path, bin, rate) {
+                         Ok((id, frames, missing)) => {
+                             ids.push(id.0);
+                             image_sequences.push(json!({"item": id.0, "frames": frames, "missing": missing}));
+diff --git a/crates/engine/src/image_sequence_tests.rs b/crates/engine/src/image_sequence_tests.rs
+index ea6dc3ad..df025bb5 100644
+--- a/crates/engine/src/image_sequence_tests.rs
++++ b/crates/engine/src/image_sequence_tests.rs
+@@ -229,3 +229,43 @@ fn image_sequence_survives_save_and_reopen() {
+     assert!(v.media.offline_status(id).is_some(), "missing first frame: offline");
+     let _ = std::fs::remove_dir_all(&dir);
+ }
++
++/// `frameRate` on File ▸ Import Image Sequence…: the sequence plays at the chosen rate (stop-motion
++/// at 12 fps no longer runs at the 29.97 default), keeps it after save and reopen, and fills its
++/// timeline clip for the right length. Out-of-range rates are refused.
++#[test]
++fn image_sequence_imports_at_the_chosen_frame_rate() {
++    let dir = tmp_dir("imgseq-rate");
++    let mut s = demo();
++    let paths = write_frames(&dir, "anim_", &[1, 2, 3, 4, 5, 6], "png");
++    let r = s.execute("file.importImageSequence", json!({"path": paths[0], "frameRate": 12})).unwrap();
++    let id = item_of(&r);
++    let m = s.project.item(id).unwrap().as_media().unwrap().clone();
++    assert_eq!(m.info.frame_rate(), FrameRate::new(12, 1));
++    assert_eq!(m.info.duration, filmcraft_time::Tick::from_seconds_f64(0.5), "6 frames at 12 fps");
++    assert_eq!(red_at(&s, id, 5), 60);
++    let end = s.active_sequence().unwrap().duration();
++    let r = s.execute("timeline.place", json!({"item": id.0, "track": "V1", "time": end.0})).unwrap();
++    let clip = ClipId(r["clips"][0].as_u64().unwrap());
++    let dur = s.active_sequence().unwrap().find_item(clip).unwrap().1.duration;
++    assert_eq!(dur, s.sequence_rate().snap_nearest(m.info.duration), "{dur:?}");
++    // NTSC rates as written, as text too, and through File ▸ Import
++    for (v, want) in [(json!(23.976), FrameRate::FPS_23_976), (json!("29.97"), FrameRate::FPS_29_97), (json!(12.5), FrameRate::new(25, 2))] {
++        let r = s.execute("file.import", json!({"paths": [paths[0]], "imageSequence": true, "frameRate": v})).unwrap();
++        assert_eq!(s.project.item(item_of(&r)).unwrap().as_media().unwrap().info.frame_rate(), want, "{v}");
++    }
++    for v in [json!(0), json!(-5), json!(1000), json!("fast")] {
++        let e = s.execute("file.importImageSequence", json!({"path": paths[0], "frameRate": v})).unwrap_err().to_string();
++        assert!(e.contains("frameRate"), "{e}");
++    }
++    // the rate is the item's: it survives save and reopen
++    let proj = dir.join("rate.fcproj");
++    s.execute("file.saveAs", json!({"path": proj.to_string_lossy()})).unwrap();
++    let mut t = Session::default();
++    t.execute("file.open", json!({"path": proj.to_string_lossy()})).unwrap();
++    assert_eq!(t.project.item(id).unwrap().as_media().unwrap().info.frame_rate(), FrameRate::new(12, 1));
++    let src = t.media.source_for(&t.project, id, &*t.services).unwrap();
++    assert_eq!(src.info().frame_rate(), FrameRate::new(12, 1));
++    assert_eq!(red_at(&t, id, 3), 40);
++    let _ = std::fs::remove_dir_all(&dir);
++}
+diff --git a/crates/engine/src/project_tools.rs b/crates/engine/src/project_tools.rs
+index 6138d86a..d6cdcf84 100644
+--- a/crates/engine/src/project_tools.rs
++++ b/crates/engine/src/project_tools.rs
+@@ -113,15 +113,26 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
+                 s.execute("file.import", json!({"paths": paths, "imageSequence": seq}))
+             },
+         ),
+-        // File ▸ Import with "Image Sequence" checked (the UI asks for the first frame).
+-        spec("file.importImageSequence", "Import Image Sequence…", &["File"], Some("Cmd+Alt+Shift+I"), r#"{"path":str,"bin":binId?}"#, always, |s, p| {
+-            let path = p.get("path").and_then(Value::as_str).ok_or_else(|| bad("file.importImageSequence", "need `path` (the first numbered still)"))?;
+-            let mut q = json!({"paths": [path], "imageSequence": true});
+-            if let Some(b) = p.get("bin") {
+-                q["bin"] = b.clone();
+-            }
+-            s.execute("file.import", q)
+-        }),
++        // File ▸ Import with "Image Sequence" checked (the UI asks for the first frame, then the
++        // frame rate). `frameRate` in frames per second; else Indeterminate Media Timebase.
++        spec(
++            "file.importImageSequence",
++            "Import Image Sequence…",
++            &["File"],
++            Some("Cmd+Alt+Shift+I"),
++            r#"{"path":str,"bin":binId?,"frameRate":num?}"#,
++            always,
++            |s, p| {
++                let path = p.get("path").and_then(Value::as_str).ok_or_else(|| bad("file.importImageSequence", "need `path` (the first numbered still)"))?;
++                let mut q = json!({"paths": [path], "imageSequence": true});
++                for k in ["bin", "frameRate"] {
++                    if let Some(v) = p.get(k) {
++                        q[k] = v.clone();
++                    }
++                }
++                s.execute("file.import", q)
++            },
++        ),
+         spec(
+             "file.exportSelectionProject",
+             "Selection as FilmCraft Project…",
+diff --git a/crates/ui-egui/src/i18n/es.tsv b/crates/ui-egui/src/i18n/es.tsv
+index 16a7be9a..36bd0cae 100644
+--- a/crates/ui-egui/src/i18n/es.tsv
++++ b/crates/ui-egui/src/i18n/es.tsv
+@@ -171,6 +171,10 @@
+ 	History	Historial
+ 	Import From	Importar desde
+ 	Import Image Sequence…	Importar secuencia de imágenes…
++	Import Image Sequence	Importar secuencia de imágenes
++	{name}: {n} frames	{name}: {n} fotogramas
++	Stills have no frame rate of their own. Choose the rate the frames were made at.	Las imágenes fijas no tienen velocidad de fotogramas propia. Elija la velocidad con la que se crearon los fotogramas.
++	Duration: {secs} s	Duración: {secs} s
+ 	Alt+double-click empty space	Alt+doble clic en un espacio vacío
+ 	Import from Media Browser	Importar desde el navegador de medios
+ 	Import…	Importar…
+diff --git a/crates/ui-egui/src/i18n/ja.tsv b/crates/ui-egui/src/i18n/ja.tsv
+index b6be39b4..06cca285 100644
+--- a/crates/ui-egui/src/i18n/ja.tsv
++++ b/crates/ui-egui/src/i18n/ja.tsv
+@@ -173,6 +173,10 @@
+ 	History	履歴
+ 	Import From	読み込み元
+ 	Import Image Sequence…	連番画像を読み込み…
++	Import Image Sequence	連番画像を読み込み
++	{name}: {n} frames	{name}: {n} フレーム
++	Stills have no frame rate of their own. Choose the rate the frames were made at.	静止画にはフレームレートがありません。フレームを作成したときのレートを選んでください。
++	Duration: {secs} s	長さ: {secs} 秒
+ 	Alt+double-click empty space	空き領域を Alt+ダブルクリック
+ 	Import from Media Browser	メディアブラウザーから読み込み
+ 	Import…	読み込み…
+diff --git a/crates/ui-egui/src/i18n/zh-cn.tsv b/crates/ui-egui/src/i18n/zh-cn.tsv
+index fb66d610..ea4072af 100644
+--- a/crates/ui-egui/src/i18n/zh-cn.tsv
++++ b/crates/ui-egui/src/i18n/zh-cn.tsv
+@@ -166,6 +166,10 @@
+ 	History	历史记录
+ 	Import From	导入来源
+ 	Import Image Sequence…	导入图像序列…
++	Import Image Sequence	导入图像序列
++	{name}: {n} frames	{name}：{n} 帧
++	Stills have no frame rate of their own. Choose the rate the frames were made at.	静止图像没有自己的帧速率。请选择制作这些帧时的帧速率。
++	Duration: {secs} s	持续时间：{secs} 秒
+ 	Alt+double-click empty space	按住 Alt 双击空白处
+ 	Import from Media Browser	从媒体浏览器导入
+ 	Import…	导入…
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index 3ba2002f..91426b02 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -1284,13 +1284,27 @@ impl FilmcraftApp {
+             }
+             // File ▸ Import with Image Sequence: choose the first numbered still. Choosing several
+             // frames (Select All in the dialog) starts from the lowest number among them. Into the
+-            // bin the Project panel shows, like Import…, unless `bin` is given.
++            // bin the Project panel shows, like Import…, unless `bin` is given. Then the frame rate
++            // dialog (`panels::image_sequence_dialog`) asks the rate, unless `frameRate` is given.
+             "file.importImageSequence" => {
+-                let bin = params.get("bin").cloned();
++                let bin = params.get("bin").and_then(Value::as_u64);
++                let rate = params.get("frameRate").cloned();
+                 self.pick(FileDialog::open_files(filmcraft_media::STILL_EXTENSIONS), move |app, paths| {
+                     let Some(path) = first_numbered_frame(paths) else { return Ok(Value::Null) };
+-                    let bin = bin.unwrap_or_else(|| json!(app.import_bin().0));
+-                    let r = app.session.execute("file.importImageSequence", json!({"path": path, "bin": bin})).map_err(|e| e.to_string());
++                    let bin = bin.unwrap_or_else(|| app.import_bin().0);
++                    if rate.is_none()
++                        && let Ok(frames) = filmcraft_engine::media_pool::image_sequence_frames(&path, &*app.session.services)
++                    {
++                        let fps = app.ui.image_sequence_fps.unwrap_or_else(|| panels::image_sequence_dialog::default_fps(app));
++                        app.ui.image_sequence_import = Some(state::ImageSequenceDraft { path, bin, frames: frames.len(), fps });
++                        return Ok(json!({"dialog": "imageSequence"}));
++                    }
++                    // a rate given, or no sequence there: import now (the engine reports why not)
++                    let mut q = json!({"path": path, "bin": bin});
++                    if let Some(rate) = rate {
++                        q["frameRate"] = rate;
++                    }
++                    let r = app.session.execute("file.importImageSequence", q).map_err(|e| e.to_string());
+                     if let Err(e) = &r {
+                         app.ui.status = e.clone();
+                     }
+diff --git a/crates/ui-egui/src/panels/dialogs.rs b/crates/ui-egui/src/panels/dialogs.rs
+index 333c7f07..29c8ddfb 100644
+--- a/crates/ui-egui/src/panels/dialogs.rs
++++ b/crates/ui-egui/src/panels/dialogs.rs
+@@ -6,6 +6,7 @@ use crate::{Dialog, FilmcraftApp};
+ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
+     crate::panels::media_dialogs::show(app, ctx);
+     crate::panels::color_dialogs::show(app, ctx);
++    crate::panels::image_sequence_dialog::show(app, ctx);
+     crate::panels::clip_dialogs::show(app, ctx);
+     crate::panels::menu_dialogs::show(app, ctx);
+     crate::panels::graphics_templates::show(app, ctx);
+diff --git a/crates/ui-egui/src/panels/image_sequence_dialog.rs b/crates/ui-egui/src/panels/image_sequence_dialog.rs
+new file mode 100644
+index 00000000..0efffef7
+--- /dev/null
++++ b/crates/ui-egui/src/panels/image_sequence_dialog.rs
+@@ -0,0 +1,76 @@
++//! Import Image Sequence… ▸ frame rate. Stills carry no frame rate, so once the first frame is
++//! chosen this asks the rate the sequence plays at (12 fps animation played at the 29.97 default
++//! looks fast-forwarded), then runs `file.importImageSequence` with `frameRate` on OK. It starts
++//! from the rate chosen last in this run, else Settings ▸ Media ▸ Indeterminate Media Timebase.
++//!
++//! Automation ids: `imageSequence.fps` (any rate), `imageSequence.preset.<fps>` (e.g.
++//! `imageSequence.preset.12`, `imageSequence.preset.23.976`), `imageSequence.ok`,
++//! `imageSequence.cancel`.
++
++use serde_json::json;
++
++use crate::FilmcraftApp;
++
++/// The rates offered as one-click choices: animation and stop-motion rates, then the video ones.
++pub const PRESETS: [f64; 14] = [8.0, 10.0, 12.0, 12.5, 15.0, 23.976, 24.0, 25.0, 29.97, 30.0, 48.0, 50.0, 59.94, 60.0];
++
++/// The rate the dialog starts from before one is chosen: Indeterminate Media Timebase.
++pub fn default_fps(app: &FilmcraftApp) -> f64 {
++    let r = filmcraft_engine::settings::timebase_rate(&app.session.prefs.media.indeterminate_timebase);
++    (r.as_f64() * 1000.0).round() / 1000.0
++}
++
++pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
++    let Some(mut d) = app.ui.image_sequence_import.clone() else { return };
++    let mut elems: Vec<(String, egui::Rect, String)> = Vec::new();
++    let (mut ok, mut cancel) = (false, false);
++    let name = std::path::Path::new(&d.path).file_name().map_or_else(|| d.path.clone(), |n| n.to_string_lossy().to_string());
++    let n = d.frames;
++    egui::Window::new(tl!("Import Image Sequence"))
++        .id(egui::Id::new("Import Image Sequence"))
++        .collapsible(false)
++        .resizable(false)
++        .pivot(egui::Align2::CENTER_CENTER)
++        .default_pos(crate::widgets::dialog_center(ctx))
++        .default_width(360.0)
++        .show(ctx, |ui| {
++            ui.label(egui::RichText::new(tlf!("{name}: {n} frames", name, n)).strong());
++            ui.label(tl!("Stills have no frame rate of their own. Choose the rate the frames were made at."));
++            ui.add_space(4.0);
++            ui.horizontal(|ui| {
++                ui.label(tl!("Frame Rate"));
++                let r = ui.add(egui::DragValue::new(&mut d.fps).range(1.0..=240.0).speed(0.05).max_decimals(3).suffix(" fps"));
++                elems.push(("imageSequence.fps".into(), r.rect, "Frame Rate".into()));
++            });
++            ui.horizontal_wrapped(|ui| {
++                for p in PRESETS {
++                    let r = ui.selectable_label((d.fps - p).abs() < 0.0005, p.to_string());
++                    if r.clicked() {
++                        d.fps = p;
++                    }
++                    elems.push((format!("imageSequence.preset.{p}"), r.rect, format!("{p} fps")));
++                }
++            });
++            let secs = format!("{:.2}", n as f64 / d.fps.max(1.0));
++            ui.label(tlf!("Duration: {secs} s", secs));
++            ui.add_space(6.0);
++            ui.horizontal(|ui| {
++                let r = ui.button(tl!("Cancel"));
++                elems.push(("imageSequence.cancel".into(), r.rect, "Cancel".into()));
++                cancel = r.clicked();
++                let r = ui.button(tl!("OK"));
++                elems.push(("imageSequence.ok".into(), r.rect, "OK".into()));
++                ok = r.clicked();
++            });
++        });
++    for (id, r, l) in elems {
++        app.auto.add(&id, r, &l);
++    }
++    if ok {
++        app.ui.image_sequence_fps = Some(d.fps);
++        if let Err(e) = app.session.execute("file.importImageSequence", json!({"path": d.path, "bin": d.bin, "frameRate": d.fps})) {
++            app.ui.status = e.to_string();
++        }
++    }
++    app.ui.image_sequence_import = (!ok && !cancel && !crate::widgets::escape_closes(ctx)).then_some(d);
++}
+diff --git a/crates/ui-egui/src/panels/mod.rs b/crates/ui-egui/src/panels/mod.rs
+index 149ce667..7970b7bd 100644
+--- a/crates/ui-egui/src/panels/mod.rs
++++ b/crates/ui-egui/src/panels/mod.rs
+@@ -14,6 +14,7 @@ pub mod file_dialogs;
+ pub mod frame_export;
+ pub mod graphics;
+ pub mod graphics_templates;
++pub mod image_sequence_dialog;
+ pub mod import_mode;
+ pub mod interchange_export;
+ pub mod keyboard;
+diff --git a/crates/ui-egui/src/state.rs b/crates/ui-egui/src/state.rs
+index c6b7d40c..5ea8f5dc 100644
+--- a/crates/ui-egui/src/state.rs
++++ b/crates/ui-egui/src/state.rs
+@@ -548,6 +548,12 @@ pub struct UiState {
+     /// Open colour dialog (Interpret Footage ▸ Color Management, Sequence ▸ Color Management).
+     #[serde(default)]
+     pub color_dialog: Option<ColorDialog>,
++    /// Import Image Sequence… ▸ frame rate dialog (open when Some).
++    #[serde(default)]
++    pub image_sequence_import: Option<ImageSequenceDraft>,
++    /// The frame rate last chosen there (this run); the dialog starts from it.
++    #[serde(default)]
++    pub image_sequence_fps: Option<f64>,
+     /// Free-draw (pen) mask being placed on the Program monitor (Effect Controls ▸ pen icon).
+     #[serde(default)]
+     pub mask_pen: Option<MaskPenDraft>,
+@@ -785,6 +791,19 @@ impl Default for ProjectManagerDraft {
+     }
+ }
+ 
++/// Import Image Sequence… after the first frame is chosen: the rate the stills play at.
++#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
++#[serde(default)]
++pub struct ImageSequenceDraft {
++    /// The first frame (`file.importImageSequence`'s `path`).
++    pub path: String,
++    pub bin: u64,
++    /// Frames from `path` to the highest number present (gaps included).
++    pub frames: usize,
++    /// Frames per second (`frameRate`).
++    pub fps: f64,
++}
++
+ /// Colour dialogs: drafts are applied with one engine command on OK.
+ #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+ pub enum ColorDialog {
+@@ -1000,6 +1019,8 @@ impl Default for UiState {
+             project_manager: None,
+             make_offline: None,
+             color_dialog: None,
++            image_sequence_import: None,
++            image_sequence_fps: None,
+             mask_pen: None,
+             save_preset: None,
+             audio_fx_editors: Vec::new(),
+diff --git a/crates/ui-egui/tests/project_panel_ui.rs b/crates/ui-egui/tests/project_panel_ui.rs
+index a7ede5d8..97c5a122 100644
+--- a/crates/ui-egui/tests/project_panel_ui.rs
++++ b/crates/ui-egui/tests/project_panel_ui.rs
+@@ -868,7 +868,9 @@ fn double_click_empty_area_imports_with_a_project_loaded() {
+ /// Import Image Sequence… from the Project panel: the footer button, the empty-space right-click
+ /// menu, Alt+double-click on empty space and its shortcut each open the stills-only dialog and
+ /// import into the bin the panel shows. The dialog returns every frame, last first (Select All);
+-/// the sequence still starts at frame 1. A plain double-click keeps opening Import….
++/// the sequence still starts at frame 1. A plain double-click keeps opening Import…. After the
++/// frames come the frame rate dialog: the rate chosen there is the sequence's, and the next
++/// import starts from it; Cancel imports nothing.
+ #[test]
+ fn import_image_sequence_from_the_project_panel() {
+     let dir = std::env::temp_dir().join(format!("fc-ui-imgseq-panel-{}", std::process::id()));
+@@ -927,26 +929,51 @@ fn import_image_sequence_from_the_project_panel() {
+         d.frames(3);
+     };
+ 
+-    // the footer button
++    // the frame rate dialog: OK imports at the rate shown
++    let confirm = |d: &mut Driver| {
++        d.wait_for("imageSequence.ok");
++        d.click("imageSequence.ok");
++        d.frames(3);
++    };
++
++    // the footer button; the dialog starts at Indeterminate Media Timebase, 12 fps is chosen
+     d.click("project.button.file.importImageSequence");
+     assert_eq!(opened_so_far().1, Some("sequence"));
++    d.wait_for("imageSequence.preset.12");
++    assert!(sequences(&mut d).is_empty(), "nothing is imported before the rate is chosen");
++    assert_eq!(d.app().ui.image_sequence_import.as_ref().map(|q| (q.frames, q.fps)), Some((5, 29.97)));
++    d.click("imageSequence.preset.12");
++    confirm(&mut d);
++    assert!(d.app().ui.image_sequence_import.is_none(), "OK closes the dialog");
+     let got = sequences(&mut d);
+     assert_eq!(got.len(), 1, "imported into the shown bin");
+     let m = d.app().session.project.item(got[0]).unwrap().as_media().unwrap().clone();
++    assert_eq!(m.info.frame_rate(), filmcraft_time::FrameRate::new(12, 1), "the chosen rate");
+     assert_eq!(m.info.duration, m.info.frame_rate().tick_of(5), "all five frames, from the lowest number");
+ 
++    // Cancel: nothing imported
++    d.click("project.button.file.importImageSequence");
++    d.wait_for("imageSequence.cancel");
++    assert_eq!(d.app().ui.image_sequence_import.as_ref().map(|q| q.fps), Some(12.0), "starts from the last rate");
++    d.click("imageSequence.cancel");
++    d.frames(3);
++    assert!(d.app().ui.image_sequence_import.is_none());
++    assert_eq!(sequences(&mut d).len(), 1);
++
+     // right-click empty space ▸ Import Image Sequence…
+     let r = d.rect("project.empty");
+     let empty = egui::pos2(r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+     press(&mut d, empty, egui::PointerButton::Secondary, egui::Modifiers::NONE, 1);
+     d.wait_for("project.menu.importImageSequence");
+     d.click("project.menu.importImageSequence");
++    confirm(&mut d);
+     assert_eq!(sequences(&mut d).len(), 2);
+ 
+     // Alt+double-click empty space; a plain double-click is still Import…
+     let n = opened_so_far().0;
+     press(&mut d, empty, egui::PointerButton::Primary, egui::Modifiers::ALT, 2);
+     assert_eq!(opened_so_far(), (n + 1, Some("sequence")));
++    confirm(&mut d);
+     assert_eq!(sequences(&mut d).len(), 3);
+     press(&mut d, empty, egui::PointerButton::Primary, egui::Modifiers::NONE, 2);
+     assert_eq!(opened_so_far(), (n + 2, Some("import")));
+@@ -954,7 +981,11 @@ fn import_image_sequence_from_the_project_panel() {
+     // the shortcut
+     d.key("Cmd+Alt+Shift+I");
+     assert_eq!(opened_so_far().1, Some("sequence"));
+-    assert_eq!(sequences(&mut d).len(), 4);
++    confirm(&mut d);
++    let got = sequences(&mut d);
++    assert_eq!(got.len(), 4);
++    let rates: Vec<_> = got.iter().map(|i| d.app().session.project.item(*i).unwrap().as_media().unwrap().info.frame_rate()).collect();
++    assert!(rates.iter().all(|r| *r == filmcraft_time::FrameRate::new(12, 1)), "{rates:?}");
+     let _ = std::fs::remove_dir_all(&dir);
+ }
+ 
