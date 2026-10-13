@@ -1,0 +1,332 @@
+diff --git a/crates/engine/src/project_tools.rs b/crates/engine/src/project_tools.rs
+index bcda383..6138d86 100644
+--- a/crates/engine/src/project_tools.rs
++++ b/crates/engine/src/project_tools.rs
+@@ -114,7 +114,7 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
+             },
+         ),
+         // File ▸ Import with "Image Sequence" checked (the UI asks for the first frame).
+-        spec("file.importImageSequence", "Import Image Sequence…", &["File"], None, r#"{"path":str,"bin":binId?}"#, always, |s, p| {
++        spec("file.importImageSequence", "Import Image Sequence…", &["File"], Some("Cmd+Alt+Shift+I"), r#"{"path":str,"bin":binId?}"#, always, |s, p| {
+             let path = p.get("path").and_then(Value::as_str).ok_or_else(|| bad("file.importImageSequence", "need `path` (the first numbered still)"))?;
+             let mut q = json!({"paths": [path], "imageSequence": true});
+             if let Some(b) = p.get("bin") {
+diff --git a/crates/engine/src/project_tools_tests.rs b/crates/engine/src/project_tools_tests.rs
+index 90b1148..9e73cb8 100644
+--- a/crates/engine/src/project_tools_tests.rs
++++ b/crates/engine/src/project_tools_tests.rs
+@@ -77,6 +77,7 @@ fn file_edit_clip_menu_order_and_shortcuts_match_premiere() {
+     for (id, label, sc) in [
+         ("file.close", "Close", Some("Cmd+W")),
+         ("file.importFromMediaBrowser", "Import from Media Browser", Some("Cmd+Alt+I")),
++        ("file.importImageSequence", "Import Image Sequence…", Some("Cmd+Alt+Shift+I")),
+         ("file.mediaProperties", "Selection…", Some("Cmd+Shift+H")),
+         ("file.exportSelectionProject", "Selection as FilmCraft Project…", None),
+         ("file.exportAle", "Avid Log Exchange…", None),
+@@ -92,6 +93,7 @@ fn file_edit_clip_menu_order_and_shortcuts_match_premiere() {
+     let s = Session::default();
+     assert_eq!(s.shortcuts.primary("edit.find").as_deref(), Some("Cmd+F"));
+     assert_eq!(s.shortcuts.primary("edit.editOriginal").as_deref(), Some("Cmd+E"));
++    assert_eq!(s.shortcuts.primary("file.importImageSequence").as_deref(), Some("Cmd+Alt+Shift+I"));
+ }
+ 
+ #[test]
+diff --git a/crates/ui-egui/src/i18n/es.tsv b/crates/ui-egui/src/i18n/es.tsv
+index 8145872..16a7be9 100644
+--- a/crates/ui-egui/src/i18n/es.tsv
++++ b/crates/ui-egui/src/i18n/es.tsv
+@@ -171,6 +171,7 @@
+ 	History	Historial
+ 	Import From	Importar desde
+ 	Import Image Sequence…	Importar secuencia de imágenes…
++	Alt+double-click empty space	Alt+doble clic en un espacio vacío
+ 	Import from Media Browser	Importar desde el navegador de medios
+ 	Import…	Importar…
+ 	Info	Información
+diff --git a/crates/ui-egui/src/i18n/ja.tsv b/crates/ui-egui/src/i18n/ja.tsv
+index 2f6add5..b6be39b 100644
+--- a/crates/ui-egui/src/i18n/ja.tsv
++++ b/crates/ui-egui/src/i18n/ja.tsv
+@@ -173,6 +173,7 @@
+ 	History	履歴
+ 	Import From	読み込み元
+ 	Import Image Sequence…	連番画像を読み込み…
++	Alt+double-click empty space	空き領域を Alt+ダブルクリック
+ 	Import from Media Browser	メディアブラウザーから読み込み
+ 	Import…	読み込み…
+ 	Info	情報
+diff --git a/crates/ui-egui/src/i18n/zh-cn.tsv b/crates/ui-egui/src/i18n/zh-cn.tsv
+index 7459caa..fb66d61 100644
+--- a/crates/ui-egui/src/i18n/zh-cn.tsv
++++ b/crates/ui-egui/src/i18n/zh-cn.tsv
+@@ -166,6 +166,7 @@
+ 	History	历史记录
+ 	Import From	导入来源
+ 	Import Image Sequence…	导入图像序列…
++	Alt+double-click empty space	按住 Alt 双击空白处
+ 	Import from Media Browser	从媒体浏览器导入
+ 	Import…	导入…
+ 	Info	信息
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index 9a6393b..3ba2002 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -1282,15 +1282,21 @@ impl FilmcraftApp {
+                     r
+                 })
+             }
+-            // File ▸ Import with Image Sequence: choose the first numbered still
+-            "file.importImageSequence" => self.pick(FileDialog::open_files(filmcraft_media::STILL_EXTENSIONS), |app, paths| {
+-                let Some(path) = paths.into_iter().next() else { return Ok(Value::Null) };
+-                let r = app.session.execute("file.importImageSequence", json!({"path": path})).map_err(|e| e.to_string());
+-                if let Err(e) = &r {
+-                    app.ui.status = e.clone();
+-                }
+-                r
+-            }),
++            // File ▸ Import with Image Sequence: choose the first numbered still. Choosing several
++            // frames (Select All in the dialog) starts from the lowest number among them. Into the
++            // bin the Project panel shows, like Import…, unless `bin` is given.
++            "file.importImageSequence" => {
++                let bin = params.get("bin").cloned();
++                self.pick(FileDialog::open_files(filmcraft_media::STILL_EXTENSIONS), move |app, paths| {
++                    let Some(path) = first_numbered_frame(paths) else { return Ok(Value::Null) };
++                    let bin = bin.unwrap_or_else(|| json!(app.import_bin().0));
++                    let r = app.session.execute("file.importImageSequence", json!({"path": path, "bin": bin})).map_err(|e| e.to_string());
++                    if let Err(e) = &r {
++                        app.ui.status = e.clone();
++                    }
++                    r
++                })
++            }
+             "file.saveAs" | "file.save" | "file.saveCopy" => {
+                 let suggested =
+                     if id == "file.saveCopy" { format!("{} copy.fcproj", self.session.project.name) } else { format!("{}.fcproj", self.session.project.name) };
+@@ -2210,6 +2216,31 @@ mod clipboard_key_tests {
+     }
+ }
+ 
++/// The frame Import Image Sequence… starts from when the dialog returns `paths`: the lowest-numbered
++/// still among them, so picking one frame, or every frame with Select All, imports the whole run.
++/// A path without a frame number comes last (the import then reports it).
++fn first_numbered_frame(paths: Vec<String>) -> Option<String> {
++    paths.into_iter().min_by_key(|p| filmcraft_media::sequence::Numbered::parse(p).map_or(u64::MAX, |n| n.number))
++}
++
++#[cfg(test)]
++mod first_numbered_frame_tests {
++    use super::first_numbered_frame;
++
++    #[test]
++    fn the_lowest_frame_of_a_selection_starts_the_sequence() {
++        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
++        assert_eq!(first_numbered_frame(v(&[])), None);
++        assert_eq!(first_numbered_frame(v(&["C:/shots/plate_0007.png"])).as_deref(), Some("C:/shots/plate_0007.png"));
++        // Select All in the dialog: the order it returns them in does not matter
++        let all = v(&["C:/shots/plate_0003.png", "C:/shots/plate_0010.png", "C:/shots/plate_0001.png", "C:/shots/plate_0002.png"]);
++        assert_eq!(first_numbered_frame(all).as_deref(), Some("C:/shots/plate_0001.png"));
++        // unpadded numbers compare as numbers, not text
++        assert_eq!(first_numbered_frame(v(&["/s/f10.exr", "/s/f9.exr"])).as_deref(), Some("/s/f9.exr"));
++        assert_eq!(first_numbered_frame(v(&["/s/cover.png", "/s/f2.png"])).as_deref(), Some("/s/f2.png"));
++    }
++}
++
+ #[cfg(test)]
+ mod gpu_fallback_tests {
+     use filmcraft_render::plan::{FramePlan, PlanLayer};
+diff --git a/crates/ui-egui/src/panels/project.rs b/crates/ui-egui/src/panels/project.rs
+index e6d95c0..acfd112 100644
+--- a/crates/ui-egui/src/panels/project.rs
++++ b/crates/ui-egui/src/panels/project.rs
+@@ -576,7 +576,7 @@ fn footer(app: &mut FilmcraftApp, ui: &mut egui::Ui, bar: Rect, v: &View, action
+         x += 28.0;
+     }
+     // thumbnail size: in-memory while dragging, saved on release
+-    let sw = (bar.width() - 300.0).clamp(40.0, 120.0);
++    let sw = (bar.width() - 328.0).clamp(40.0, 120.0);
+     let sr = Rect::from_min_size(pos2(x + 8.0, bar.min.y + 8.0), vec2(sw, 16.0));
+     let mut sz = v.icon_size;
+     let resp = ui.put(sr, egui::Slider::new(&mut sz, 48.0..=400.0).show_value(false));
+@@ -618,6 +618,7 @@ fn footer(app: &mut FilmcraftApp, ui: &mut egui::Ui, bar: Rect, v: &View, action
+     for (icon, id, tip) in [
+         (Icon::Trash, "project.delete", tl!("Clear (Delete)")),
+         (Icon::NewItem, "new-item", tl!("New Item")),
++        (Icon::Image, "file.importImageSequence", tl!("Import Image Sequence…")),
+         (Icon::Folder, "file.newBin", tl!("New Bin")),
+         (Icon::Search, "find", tl!("Find")),
+         (Icon::Automate, "clip.automateToSequence", tl!("Automate to Sequence")),
+diff --git a/crates/ui-egui/src/panels/project_views.rs b/crates/ui-egui/src/panels/project_views.rs
+index 951dd58..38b06b0 100644
+--- a/crates/ui-egui/src/panels/project_views.rs
++++ b/crates/ui-egui/src/panels/project_views.rs
+@@ -574,8 +574,16 @@ fn background(ui: &egui::Ui, v: &View) -> egui::Response {
+     ui.interact(ui.clip_rect(), egui::Id::new((&v.prefix, "background")), Sense::click_and_drag())
+ }
+ 
++/// Double-clicking empty space: Import…, or Import Image Sequence… with Alt held.
++fn import_on_double_click(ui: &egui::Ui, bg: &egui::Response, actions: &mut Actions) {
++    if bg.double_clicked() {
++        let cmd = if ui.input(|i| i.modifiers.alt) { "file.importImageSequence" } else { "file.import" };
++        actions.push((cmd.into(), json!({})));
++    }
++}
++
+ /// Empty space under the rows / cards, and the gaps between them (`bg`): click deselects,
+-/// double-click imports, right-click menu, drag selects with a marquee.
++/// double-click imports (Alt: an image sequence), right-click menu, drag selects with a marquee.
+ fn empty_space(app: &mut FilmcraftApp, ui: &mut egui::Ui, v: &View, bg: &egui::Response, actions: &mut Actions) {
+     let rest = ui.available_rect_before_wrap();
+     let r = Rect::from_min_size(rest.min, vec2(rest.width(), rest.height().max(40.0)));
+@@ -587,9 +595,7 @@ fn empty_space(app: &mut FilmcraftApp, ui: &mut egui::Ui, v: &View, bg: &egui::R
+         app.ui.project_panel.selected_bin = None;
+         actions.push(("project.select".into(), json!({"items": []})));
+     }
+-    if bg.double_clicked() {
+-        actions.push(("file.import".into(), json!({})));
+-    }
++    import_on_double_click(ui, bg, actions);
+     let bin = (v.bin != app.session.project.root.id).then_some(v.bin.0);
+     bg.context_menu(|ui| background_menu(app, ui, v, bin, actions));
+ }
+@@ -666,9 +672,26 @@ fn background_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, v: &View, bin: Opt
+             ui.close();
+         }
+     }
++    import_image_sequence_entry(app, ui, &format!("{}.menu.importImageSequence", v.prefix), actions);
+     ui.menu_button(tl!("New Item"), |ui| crate::panels::project::new_item_menu(app, ui, &v.prefix, actions));
+ }
+ 
++/// Import Image Sequence… in the Project panel's right-click menus, with its shortcut. The file
++/// dialog imports into the bin the panel shows.
++fn import_image_sequence_entry(app: &mut FilmcraftApp, ui: &mut egui::Ui, auto_id: &str, actions: &mut Actions) {
++    let label = tl!("Import Image Sequence…");
++    let mut b = egui::Button::new(label);
++    if let Some(s) = app.session.shortcuts.primary("file.importImageSequence") {
++        b = b.shortcut_text(s);
++    }
++    let r = ui.add(b).on_hover_text(tl!("Alt+double-click empty space"));
++    app.auto.add(auto_id, r.rect, label);
++    if r.clicked() {
++        actions.push(("file.importImageSequence".into(), json!({})));
++        ui.close();
++    }
++}
++
+ #[allow(clippy::too_many_arguments)]
+ fn list_bin(app: &mut FilmcraftApp, ui: &mut egui::Ui, bin: &Bin, depth: usize, filter: &str, row: &mut usize, actions: &mut Actions, v: &View, lc: &ListCtx) {
+     let t = app.tokens;
+@@ -1106,9 +1129,7 @@ pub fn freeform_view(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, v: &
+             app.ui.project_panel.selected_bin = None;
+             actions.push(("project.select".into(), json!({"items": []})));
+         }
+-        if bg.double_clicked() {
+-            actions.push(("file.import".into(), json!({})));
+-        }
++        import_on_double_click(ui, &bg, actions);
+         let bin = Some(v.bin.0);
+         bg.context_menu(|ui| canvas_menu(app, ui, v, bin, actions));
+     });
+diff --git a/crates/ui-egui/tests/project_panel_ui.rs b/crates/ui-egui/tests/project_panel_ui.rs
+index 8a76e0a..a7ede5d 100644
+--- a/crates/ui-egui/tests/project_panel_ui.rs
++++ b/crates/ui-egui/tests/project_panel_ui.rs
+@@ -865,6 +865,99 @@ fn double_click_empty_area_imports_with_a_project_loaded() {
+     assert!(picked <= 2, "double-clicking a bin must not open Import");
+ }
+ 
++/// Import Image Sequence… from the Project panel: the footer button, the empty-space right-click
++/// menu, Alt+double-click on empty space and its shortcut each open the stills-only dialog and
++/// import into the bin the panel shows. The dialog returns every frame, last first (Select All);
++/// the sequence still starts at frame 1. A plain double-click keeps opening Import….
++#[test]
++fn import_image_sequence_from_the_project_panel() {
++    let dir = std::env::temp_dir().join(format!("fc-ui-imgseq-panel-{}", std::process::id()));
++    std::fs::create_dir_all(&dir).unwrap();
++    let mut frames: Vec<String> = (1..=5)
++        .map(|n| {
++            let p = dir.join(format!("plate_{n:04}.png"));
++            image::RgbaImage::from_pixel(16, 9, image::Rgba([n as u8 * 40, 0, 0, 255])).save(&p).unwrap();
++            p.to_string_lossy().to_string()
++        })
++        .collect();
++    frames.reverse();
++
++    let mut session = Session::default();
++    let plates = filmcraft_project::BinId(session.execute("file.newBin", json!({"name": "Plates"})).unwrap()["bin"].as_u64().unwrap());
++    let (tx, rx) = channel();
++    let mut app = FilmcraftApp::new(session).with_control(rx);
++    app.ui.project_panel.bin = Some(plates.0);
++    // which dialog opened: "sequence" (stills only) or "import" (movies too)
++    let opened = std::sync::Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
++    let seen = opened.clone();
++    app.hooks.pick_files = Some(Box::new(move |exts| {
++        let sequence = !exts.contains(&"mp4");
++        seen.lock().unwrap().push(if sequence { "sequence" } else { "import" });
++        if sequence { frames.clone() } else { Vec::new() }
++    }));
++    let harness = Harness::builder().with_size(egui::vec2(1600.0, 980.0)).with_step_dt(1.0 / 60.0).with_max_steps(10_000).build_eframe(move |_cc| app);
++    let mut d = Driver { harness, tx, snapshots: None };
++    d.ok("ui.panel.show", json!({"panel": "Project"}));
++    d.ok("ui.set", json!({"focused": "Project"}));
++    d.frames(10);
++    // (dialogs opened so far, the last one)
++    let opened_so_far = || {
++        let o = opened.lock().unwrap();
++        (o.len(), o.last().copied())
++    };
++    let sequences = |d: &mut Driver| -> Vec<ItemId> {
++        let bin = d.app().session.project.root.find_bin(plates).unwrap().clone();
++        bin.children
++            .iter()
++            .filter_map(|e| if let BinEntry::Item(i) = e { Some(*i) } else { None })
++            .filter(|i| d.app().session.project.item(*i).and_then(|it| it.as_media()).is_some_and(|m| m.info.kind == filmcraft_media::MediaKind::ImageSequence))
++            .collect()
++    };
++    let press = |d: &mut Driver, at: egui::Pos2, button: egui::PointerButton, modifiers: egui::Modifiers, times: usize| {
++        d.frames(60);
++        d.harness.input_mut().events.extend([egui::Event::ModifiersChanged(modifiers), egui::Event::PointerMoved(at)]);
++        d.frames(1);
++        for _ in 0..times {
++            for pressed in [true, false] {
++                d.harness.input_mut().events.push(egui::Event::PointerButton { pos: at, button, pressed, modifiers });
++                d.frames(1);
++            }
++        }
++        d.harness.input_mut().events.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
++        d.frames(3);
++    };
++
++    // the footer button
++    d.click("project.button.file.importImageSequence");
++    assert_eq!(opened_so_far().1, Some("sequence"));
++    let got = sequences(&mut d);
++    assert_eq!(got.len(), 1, "imported into the shown bin");
++    let m = d.app().session.project.item(got[0]).unwrap().as_media().unwrap().clone();
++    assert_eq!(m.info.duration, m.info.frame_rate().tick_of(5), "all five frames, from the lowest number");
++
++    // right-click empty space ▸ Import Image Sequence…
++    let r = d.rect("project.empty");
++    let empty = egui::pos2(r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
++    press(&mut d, empty, egui::PointerButton::Secondary, egui::Modifiers::NONE, 1);
++    d.wait_for("project.menu.importImageSequence");
++    d.click("project.menu.importImageSequence");
++    assert_eq!(sequences(&mut d).len(), 2);
++
++    // Alt+double-click empty space; a plain double-click is still Import…
++    let n = opened_so_far().0;
++    press(&mut d, empty, egui::PointerButton::Primary, egui::Modifiers::ALT, 2);
++    assert_eq!(opened_so_far(), (n + 1, Some("sequence")));
++    assert_eq!(sequences(&mut d).len(), 3);
++    press(&mut d, empty, egui::PointerButton::Primary, egui::Modifiers::NONE, 2);
++    assert_eq!(opened_so_far(), (n + 2, Some("import")));
++
++    // the shortcut
++    d.key("Cmd+Alt+Shift+I");
++    assert_eq!(opened_so_far().1, Some("sequence"));
++    assert_eq!(sequences(&mut d).len(), 4);
++    let _ = std::fs::remove_dir_all(&dir);
++}
++
+ /// The report: with audio placed in the timeline, double-clicking the Project panel's empty space
+ /// no longer opened Import. A new sequence with a tone on A1 (so the panel shows the sequence and
+ /// the audio clip as cards); every empty spot opens Import: the strip under the cards and the space

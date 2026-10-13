@@ -8,10 +8,14 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  # the crates the patches change
+  CRATES: -p filmcraft-audio-dsp -p filmcraft-project -p filmcraft-render -p filmcraft-engine -p filmcraft-ui-egui
+
 jobs:
   verify:
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
 
@@ -29,15 +33,24 @@ jobs:
 
       - name: Format
         working-directory: ../filmcraft
-        run: cargo fmt --check -p filmcraft-audio-dsp -p filmcraft-project -p filmcraft-render
+        shell: bash
+        run: cargo fmt --check $CRATES
 
       - name: Clippy
         working-directory: ../filmcraft
-        run: cargo clippy -p filmcraft-audio-dsp -p filmcraft-project -p filmcraft-render --all-targets -- -D warnings
+        shell: bash
+        run: cargo clippy $CRATES --all-targets -- -D warnings
 
-      - name: Tests
+      - name: Tests (0001 Distance & Space)
         working-directory: ../filmcraft
         run: cargo test -p filmcraft-audio-dsp -p filmcraft-project -p filmcraft-render
+
+      - name: Tests (0002 image sequence import)
+        working-directory: ../filmcraft
+        run: |
+          cargo test -p filmcraft-engine --lib project_tools
+          cargo test -p filmcraft-ui-egui --lib first_numbered_frame
+          cargo test -p filmcraft-ui-egui --test project_panel_ui
 
       - name: UI translations
         working-directory: ../filmcraft

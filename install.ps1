@@ -86,8 +86,15 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
 Push-Location $Target
 try {
     if ($Test) {
-        & cargo test -p filmcraft-audio-dsp -p filmcraft-project -p filmcraft-render
-        if ($LASTEXITCODE -ne 0) { throw 'tests failed' }
+        $suites = @(
+            @('-p', 'filmcraft-audio-dsp', '-p', 'filmcraft-project', '-p', 'filmcraft-render'),
+            @('-p', 'filmcraft-engine', '--lib', 'project_tools'),
+            @('-p', 'filmcraft-ui-egui', '--test', 'project_panel_ui', 'import_image_sequence')
+        )
+        foreach ($s in $suites) {
+            & cargo test @s
+            if ($LASTEXITCODE -ne 0) { throw 'tests failed' }
+        }
     }
     if (-not $NoRun) {
         Write-Host 'Building and starting FilmCraft (the first build takes several minutes) ...'
