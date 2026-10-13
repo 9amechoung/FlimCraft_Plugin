@@ -8,6 +8,7 @@ FilmCraft에는 플러그인 API가 없어서, 이 저장소의 패치를 FilmCr
 | 패치 | 내용 |
 |---|---|
 | `0001-distance-and-space-audio-effect.patch` | 오디오 효과 **Distance & Space**(거리와 공간) |
+| `0002-project-panel-image-sequence-import.patch` | Project 패널에서 바로 **이미지 시퀀스 불러오기**(우클릭·Alt+더블클릭·버튼·단축키) |
 
 기준 FilmCraft 버전: `FILMCRAFT_COMMIT` (0.7.2, `71438c6`)
 
@@ -36,6 +37,22 @@ FilmCraft에는 플러그인 API가 없어서, 이 저장소의 패치를 FilmCr
 
 Distance, Reverb Amount, Position, Air Absorption, Output Gain은 키프레임을 줄 수 있습니다.
 
+## 이미지 시퀀스 빨리 불러오기
+
+원래 FilmCraft에서는 **File ▸ Import Image Sequence…** 메뉴로만 불러올 수 있었고, 단축키도 없었습니다.
+이 패치로 Project 패널에서 바로 부를 수 있습니다.
+
+| 방법 | 동작 |
+|---|---|
+| 빈 곳 **우클릭** ▸ **Import Image Sequence…** | 파일 선택 창을 엽니다(List / Icon / Freeform 보기 모두) |
+| 빈 곳 **Alt + 더블클릭** | 같은 창을 엽니다. 그냥 더블클릭은 기존처럼 일반 Import… 창을 엽니다 |
+| 패널 아래 **그림 아이콘** 버튼 | 같은 창을 엽니다(새 빈(폴더) 버튼 옆) |
+| **Ctrl+Alt+Shift+I** (macOS ⌘⌥⇧I) | 어디서든 같은 창을 엽니다. Keyboard Shortcuts에서 바꿀 수 있습니다 |
+
+- 파일 창에서는 **첫 프레임 하나만** 고르거나 **Ctrl+A로 전부** 골라도 됩니다. 고른 것 중 번호가 가장 작은 프레임부터 시퀀스가 만들어집니다.
+- 지금 패널에 열려 있는 빈(폴더)으로 들어갑니다.
+- 그냥 더블클릭으로 연 일반 Import 창에서도 시퀀스로 받고 싶다면 **Settings ▸ Media ▸ Import numbered stills as image sequences**를 켜세요. 번호 붙은 이미지 하나를 고르면 시퀀스로 들어옵니다(원래 FilmCraft 기능).
+
 ## 설치(터미널 한 줄)
 
 필요한 것: Git, [Rust](https://rustup.rs) 1.95 이상, Visual Studio C++ 빌드 도구(Windows).
@@ -59,7 +76,7 @@ irm https://raw.githubusercontent.com/9amechoung/FlimCraft_Plugin/main/install.p
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/9amechoung/FlimCraft_Plugin/main/install.ps1))) -Test
 ```
 
-- `-Test`: 실행 전에 패치 관련 테스트를 돌립니다(`audio-dsp`, `project`, `render` 크레이트).
+- `-Test`: 실행 전에 패치 관련 테스트를 돌립니다(`audio-dsp`, `project`, `render` 크레이트와 이미지 시퀀스 UI 테스트).
 - `-NoRun`: 패치만 적용하고 빌드하지 않습니다.
 - `-Target C:\경로\filmcraft`: 다른 FilmCraft 폴더를 씁니다. 커밋하지 않은 변경이 있으면 멈춥니다.
 
@@ -82,4 +99,5 @@ irm https://raw.githubusercontent.com/9amechoung/FlimCraft_Plugin/main/install.p
 
 - DSP: `crates/audio-dsp/src/effects/spatial.rs`의 `Space` 효과입니다. 기존 8×8 FDN `Reverb`를 그대로 씁니다. 직접음은 거리 역제곱 감쇠, 2단 one-pole 저역통과(공기 흡수), 거리에 따른 M/S 폭 축소를 거칩니다. 도플러는 분수 지연선입니다. 울림은 거리에 따라 직접음보다 훨씬 천천히 줄어서(100 m에서 −8 dB), 먼 소리일수록 울림 비중이 커집니다.
 - 등록 위치: DSP 레지스트리(`effects/mod.rs`), 프로젝트 효과 정의(`project/src/effect/audio.rs`, id `space`), 렌더 매핑(`render/src/audio_fx.rs`의 `DIRECT`, 프리롤 3초), 스페인어·일본어 UI 번역(`ui-egui/src/i18n/*.tsv`).
-- 패치를 새로 만들려면: FilmCraft 쪽에서 수정한 뒤 `git diff 71438c6 > patches/000N-이름.patch`, 그리고 `patches/series`에 파일 이름을 한 줄 추가합니다.
+- 이미지 시퀀스(0002): 명령 `file.importImageSequence`에 기본 단축키(`engine/src/project_tools.rs`)를 주고, Project 패널의 빈 곳 메뉴·더블클릭(`ui-egui/src/panels/project_views.rs`)과 하단 버튼(`panels/project.rs`)에서 부릅니다. 파일 창 처리(`ui-egui/src/lib.rs`의 `file_dialog`)는 보이는 빈을 기본값으로 쓰고, 여러 프레임을 고르면 번호가 가장 작은 것부터 시작합니다(`first_numbered_frame`).
+- 패치를 새로 만들려면: `install.ps1 -NoRun`으로 기존 패치가 적용된 `flimcraft-plugin` 브랜치에서 수정한 뒤 `git diff HEAD > patches/000N-이름.patch`(기존 패치 위의 차이만), 그리고 `patches/series`에 파일 이름을 한 줄 추가합니다.
