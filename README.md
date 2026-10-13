@@ -53,34 +53,55 @@ Distance, Reverb Amount, Position, Air Absorption, Output Gain은 키프레임�
 - 지금 패널에 열려 있는 빈(폴더)으로 들어갑니다.
 - 그냥 더블클릭으로 연 일반 Import 창에서도 시퀀스로 받고 싶다면 **Settings ▸ Media ▸ Import numbered stills as image sequences**를 켜세요. 번호 붙은 이미지 하나를 고르면 시퀀스로 들어옵니다(원래 FilmCraft 기능).
 
-## 설치(터미널 한 줄)
+## 설치
 
-필요한 것: Git, [Rust](https://rustup.rs) 1.95 이상, Visual Studio C++ 빌드 도구(Windows).
+### 더블클릭으로 설치(가장 쉬움)
 
-FilmCraft 소스를 둘 폴더로 이동한 뒤(예: `cd C:\Dev`), PowerShell에 붙여 넣으세요.
+1. FilmCraft를 둘 폴더를 정합니다. 예: `C:\Users\<사용자>\Documents\Open`
+2. [`install.cmd`](https://github.com/9amechoung/FlimCraft_Plugin/raw/main/install.cmd)를 그 폴더에 내려받습니다(링크를 열고 **Ctrl+S**, 파일 형식은 "모든 파일").
+3. `install.cmd`를 더블클릭합니다. "Windows의 PC 보호" 창이 뜨면 **추가 정보 ▸ 실행**을 누르세요.
 
-> `C:\Program Files\FilmCraft`처럼 설치 프로그램으로 깐 FilmCraft에는 패치를 적용할 수 없습니다. 패치는 FilmCraft **소스 코드**에 적용해 새로 빌드하는 방식이라, 소스를 따로 내려받습니다. `Program Files`는 관리자 권한이 필요하니 소스 폴더로 쓰지 마세요. 기존에 설치한 FilmCraft는 그대로 두어도 됩니다.
+FilmCraft는 그 폴더 안의 `filmcraft` 폴더(예: `C:\Users\<사용자>\Documents\Open\filmcraft`)에 들어갑니다.
+다 끝나면 바탕화면과 시작 메뉴에 **FilmCraft (Plugin)** 바로가기가 생기고, 다음부터는 그걸로 실행합니다.
+
+### 터미널 한 줄
+
+FilmCraft 소스를 둘 폴더로 이동한 뒤 PowerShell에 붙여 넣으세요.
 
 ```powershell
+cd C:\Users\<사용자>\Documents\Open
 irm https://raw.githubusercontent.com/9amechoung/FlimCraft_Plugin/main/install.ps1 | iex
 ```
 
-1. 이 저장소의 패치를 GitHub에서 내려받습니다.
-2. FilmCraft를 현재 폴더의 `filmcraft`에 내려받습니다. 이미 있으면 그대로 씁니다.
-3. 기준 커밋에서 `flimcraft-plugin` 브랜치를 만들고 패치를 적용합니다.
-4. 빌드하고 실행합니다. 첫 빌드는 몇 분 걸립니다.
+> `C:\Program Files\FilmCraft`처럼 설치 프로그램으로 깐 FilmCraft에는 패치를 적용할 수 없습니다. 패치는 FilmCraft **소스 코드**에 적용해 새로 빌드하는 방식이라, 소스를 따로 내려받습니다. `Program Files`는 관리자 권한이 필요하니 소스 폴더로 쓰지 마세요. 기존에 설치한 FilmCraft는 그대로 두어도 됩니다.
 
-옵션을 쓰려면:
+### 하는 일
+
+1. 없는 도구를 물어본 뒤 설치합니다: Git(winget), [Rust](https://rustup.rs) 1.95 이상, Visual Studio C++ 빌드 도구(winget, 약 5 GB, 관리자 권한 창이 뜹니다). Rust가 1.95보다 오래됐으면 업데이트합니다.
+2. 이 저장소의 패치를 GitHub에서 내려받습니다.
+3. FilmCraft를 현재 폴더의 `filmcraft`에 내려받습니다. 이미 있으면 그대로 씁니다.
+4. 기준 커밋에서 `flimcraft-plugin` 브랜치를 만들고 패치를 적용합니다.
+5. 빌드하고(첫 빌드는 몇 분 걸리고, `filmcraft\target`에 몇 GB를 씁니다) 바로가기를 만든 뒤 실행합니다.
+
+> 문서 폴더가 OneDrive로 동기화되면 빌드 파일 수만 개가 업로드됩니다. 그럴 땐 `C:\Dev`처럼 동기화하지 않는 폴더를 쓰세요.
+
+### 옵션
 
 ```powershell
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/9amechoung/FlimCraft_Plugin/main/install.ps1))) -Test
 ```
 
+`install.cmd`에도 똑같이 붙일 수 있습니다(예: `install.cmd -Test`).
+
 - `-Test`: 실행 전에 패치 관련 테스트를 돌립니다(`audio-dsp`, `project`, `render` 크레이트와 이미지 시퀀스 UI 테스트).
 - `-NoRun`: 패치만 적용하고 빌드하지 않습니다.
 - `-Target C:\경로\filmcraft`: 다른 FilmCraft 폴더를 씁니다. 커밋하지 않은 변경이 있으면 멈춥니다.
+- `-Yes`: 없는 도구를 묻지 않고 설치합니다.
+- `-NoShortcut`: 바탕화면·시작 메뉴 바로가기를 만들지 않습니다.
 
-이 저장소를 클론했다면 `powershell -ExecutionPolicy Bypass -File .\install.ps1`로 로컬 패치를 씁니다.
+패치가 바뀌면 같은 폴더에서 다시 실행하면 됩니다. 이미 받은 소스와 빌드를 재사용해서 첫 설치보다 빠릅니다.
+
+이 저장소를 클론했다면 `install.cmd`를 더블클릭하거나 `powershell -ExecutionPolicy Bypass -File .\install.ps1`로 로컬 패치를 씁니다.
 
 ## GitHub에서만 작업하기
 
