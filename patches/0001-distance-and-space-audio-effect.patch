@@ -1,0 +1,488 @@
+diff --git a/crates/audio-dsp/README.md b/crates/audio-dsp/README.md
+index 886bacc..32dff25 100644
+--- a/crates/audio-dsp/README.md
++++ b/crates/audio-dsp/README.md
+@@ -70,6 +70,7 @@ id, name, range, default, `Unit`, log-scale hint and choice labels so UIs can be
+ | `multitap_delay` | 4 independent feedback taps, levels, mix |
+ | `convolution_reverb` | uniformly partitioned overlap-save convolution (256-sample partitions, latency 256) with 7 impulses generated here (noise with frequency-dependent exponential decay + early reflections, unit energy); room size (resampling), LF/HF damping, pre-delay, width |
+ | `surround_reverb` | early reflections + FDN late field, centre input, low/high cut, width, dry/wet (stereo rendering) |
++| `space` | Distance & Space: distance (inverse-distance level, air-absorption low-pass, narrowing image, optional Doppler delay at 343 m/s), 8 preset rooms on the FDN reverb whose level falls far slower than the direct sound, amount, left/right position, output |
+ | `click_remover` | LPC residual outlier detection (k·σ, σ from the median), AR forward/backward interpolation of ≤ 64-sample regions (latency 640) |
+ | `channel_mixer`, `stereo_expander`, `mute` | 2×2 matrix with inversion; mid/side expand + centre pan; ramped mute |
+ | `distortion`, `guitar_suite` | waveshaper (soft/hard/tube/foldback, asymmetry, tone); compressor → distortion → amp/cabinet voicing → filter |
+diff --git a/crates/audio-dsp/src/effects/mod.rs b/crates/audio-dsp/src/effects/mod.rs
+index 1a6f02a..dc1c14c 100644
+--- a/crates/audio-dsp/src/effects/mod.rs
++++ b/crates/audio-dsp/src/effects/mod.rs
+@@ -11,6 +11,7 @@ pub mod multiband;
+ pub mod pitch;
+ pub mod restoration;
+ pub mod reverbs;
++pub mod spatial;
+ pub mod special;
+ mod stft;
+ pub mod time;
+@@ -27,6 +28,7 @@ pub use multiband::{DynamicsRack, MultibandCompressor, TubeCompressor};
+ pub use pitch::PitchShifter;
+ pub use restoration::{DeHum, DeNoise};
+ pub use reverbs::{ConvolutionReverb, SurroundReverb};
++pub use spatial::Space;
+ pub use special::{AmbisonicsPanner, Binauralizer, ChannelMixer, Distortion, GuitarSuite, LoudnessMeterFx, Mastering, Mute, StereoExpander, VocalEnhancer};
+ pub use time::{Delay, Reverb};
+ 
+@@ -132,6 +134,7 @@ static REGISTRY: &[EffectInfo] = &[
+     entry!("multitap_delay", "Multitap Delay", Time, MultitapDelay),
+     entry!("convolution_reverb", "Convolution Reverb", Reverb, ConvolutionReverb),
+     entry!("surround_reverb", "Surround Reverb", Reverb, SurroundReverb),
++    entry!("space", "Distance & Space", Reverb, Space),
+     entry!("click_remover", "Automatic Click Remover", Restoration, ClickRemover),
+     entry!("channel_mixer", "Channel Mixer", Channel, ChannelMixer),
+     entry!("distortion", "Distortion", Special, Distortion),
+diff --git a/crates/audio-dsp/src/effects/spatial.rs b/crates/audio-dsp/src/effects/spatial.rs
+new file mode 100644
+index 0000000..218a733
+--- /dev/null
++++ b/crates/audio-dsp/src/effects/spatial.rs
+@@ -0,0 +1,357 @@
++//! Distance & Space: one small set of controls that places a sound in a space.
++//!
++//! - **Distance** (0.5–100 m, keyframe it to make a sound approach or recede): the direct sound
++//!   falls 6 dB per doubling of distance (+6 dB at 0.5 m, 0 dB at 1 m), loses high frequencies to
++//!   air absorption (two one-pole low-passes whose cutoff falls with distance), and its stereo
++//!   image narrows towards a point; the room's reverberation falls much more slowly, so a far
++//!   sound is mostly reverb, as in a real room.
++//! - **Space**: a preset room (open air … tunnel) for the FDN [`Reverb`] (decay, size, damping,
++//!   pre-delay, level); **Reverb Amount** scales it (0 % = dry, 200 % = twice the preset).
++//! - **Position**: left/right balance of the direct sound (the reverb stays wide).
++//! - **Doppler** (off by default): the direct sound travels through a delay of distance / 343 m/s,
++//!   so a moving distance bends the pitch like a passing car. It also delays the sound by that
++//!   travel time (29 ms at 10 m).
++
++use super::time::Reverb;
++use super::util::{DelayLine, OnePole};
++use crate::{AudioEffect, ParamSpec, ParamValues, Smoothed, Unit, block_len, db_to_gain, param_plumbing};
++
++const CHUNK: usize = 256;
++/// Speed of sound in air, m/s.
++const SPEED_OF_SOUND: f32 = 343.0;
++const MIN_DISTANCE: f32 = 0.5;
++const MAX_DISTANCE: f32 = 100.0;
++/// The distance-dependent coefficients are re-derived on this fixed sample grid (block-size
++/// independent).
++const COEF_EVERY: u32 = 16;
++
++/// Labels of the `space` parameter.
++pub const SPACES: &[&str] = &["Open Air", "Small Room", "Living Room", "Bathroom", "Concert Hall", "Church", "Cave", "Tunnel"];
++
++/// Per space: (RT60 s, room size %, HF damping %, pre-delay ms, reverb level).
++const SPACE_PRESETS: [(f32, f32, f32, f32, f32); 8] = [
++    (0.35, 100.0, 85.0, 40.0, 0.06),
++    (0.45, 15.0, 50.0, 3.0, 0.22),
++    (0.7, 35.0, 55.0, 8.0, 0.25),
++    (1.1, 10.0, 10.0, 2.0, 0.38),
++    (2.2, 80.0, 40.0, 25.0, 0.35),
++    (4.5, 100.0, 35.0, 45.0, 0.42),
++    (3.5, 90.0, 20.0, 30.0, 0.45),
++    (2.6, 60.0, 15.0, 15.0, 0.45),
++];
++
++/// Direct-sound gain at `d` metres (inverse distance law, 0 dB at 1 m).
++fn direct_gain(d: f32) -> f32 {
++    1.0 / d.max(MIN_DISTANCE)
++}
++
++/// Reverb gain at `d` metres: falls far more slowly than the direct sound (−8 dB at 100 m).
++fn reverb_falloff(d: f32) -> f32 {
++    (1.0 / d.max(1.0)).powf(0.2)
++}
++
++/// Air-absorption cutoff (Hz) at `d` metres for `air` (0…1).
++fn air_cutoff(d: f32, air: f32) -> f32 {
++    22_000.0 / (1.0 + air * (d - 1.0).max(0.0) / 6.0)
++}
++
++/// Stereo width of the direct sound at `d` metres: full up to 2 m, 30 % from 32 m.
++fn width_at(d: f32) -> f32 {
++    let t = ((d.max(2.0) / 2.0).log2() / 4.0).clamp(0.0, 1.0);
++    1.0 - 0.7 * t
++}
++
++/// Distance & Space: distance (level, air, width, optional Doppler), a preset room reverb, and
++/// left/right position, for placing ambiences and effects in a scene.
++pub struct Space {
++    pv: ParamValues,
++    sr: f32,
++    rev: Reverb,
++    /// Doppler delay lines, one per channel.
++    lines: Vec<DelayLine>,
++    /// Two cascaded one-pole air-absorption low-passes per channel.
++    air_lp: Vec<[OnePole; 2]>,
++    /// Reverb input (delayed source), then its output, for one chunk.
++    src: [[f32; CHUNK]; 2],
++    /// Per-sample reverb gain for one chunk.
++    rev_g: [f32; CHUNK],
++    dist: Smoothed,
++    air: Smoothed,
++    amount: Smoothed,
++    pan: Smoothed,
++    doppler: Smoothed,
++    out: Smoothed,
++    alpha: f64,
++    width: f32,
++    counter: u32,
++}
++
++impl Space {
++    pub const PARAMS: &'static [ParamSpec] = &[
++        ParamSpec::log("distance", "Distance", MIN_DISTANCE, MAX_DISTANCE, 1.0, Unit::None),
++        ParamSpec::choice("space", "Space", SPACES, 2),
++        ParamSpec::new("reverb", "Reverb Amount", 0.0, 200.0, 100.0, Unit::Percent),
++        ParamSpec::new("pan", "Position", -100.0, 100.0, 0.0, Unit::Pan),
++        ParamSpec::new("air", "Air Absorption", 0.0, 100.0, 100.0, Unit::Percent),
++        ParamSpec::toggle("doppler", "Doppler", false),
++        ParamSpec::new("output", "Output Gain", -24.0, 12.0, 0.0, Unit::Decibels),
++    ];
++
++    pub fn new(sample_rate: f32, channels: usize) -> Self {
++        let ch = channels.max(1);
++        let max_delay = (MAX_DISTANCE / SPEED_OF_SOUND * sample_rate) as usize + 4;
++        let mut rev = Reverb::new(sample_rate, 2);
++        rev.set_param("mix", 100.0);
++        let sm = |v, ms| Smoothed::with_ms(v, sample_rate, ms);
++        let mut s = Space {
++            pv: ParamValues::new(Self::PARAMS),
++            sr: sample_rate,
++            rev,
++            lines: vec![DelayLine::new(max_delay); ch],
++            air_lp: vec![[OnePole::default(); 2]; ch],
++            src: [[0.0; CHUNK]; 2],
++            rev_g: [0.0; CHUNK],
++            dist: sm(1.0, 50.0),
++            air: sm(1.0, 20.0),
++            amount: sm(0.0, 20.0),
++            pan: sm(0.0, 20.0),
++            doppler: sm(0.0, 200.0),
++            out: sm(1.0, 20.0),
++            alpha: 1.0,
++            width: 1.0,
++            counter: 0,
++        };
++        s.apply_params(true);
++        s.rev.reset();
++        s
++    }
++
++    fn preset(&self) -> (f32, f32, f32, f32, f32) {
++        SPACE_PRESETS[self.pv.idx("space").min(SPACE_PRESETS.len() - 1)]
++    }
++
++    fn apply_params(&mut self, snap: bool) {
++        let (rt60, size, damping, predelay, level) = self.preset();
++        self.rev.set_param("decay", rt60);
++        self.rev.set_param("size", size);
++        self.rev.set_param("damping", damping);
++        self.rev.set_param("predelay", predelay);
++        self.dist.set(self.pv.v("distance"));
++        self.air.set(self.pv.v("air") / 100.0);
++        self.amount.set(level * self.pv.v("reverb") / 100.0);
++        self.pan.set(self.pv.v("pan") / 100.0);
++        self.doppler.set(if self.pv.on("doppler") { 1.0 } else { 0.0 });
++        self.out.set(db_to_gain(self.pv.v("output")));
++        if snap {
++            for s in [&mut self.dist, &mut self.air, &mut self.amount, &mut self.pan, &mut self.doppler, &mut self.out] {
++                s.snap();
++            }
++            self.update_coefs();
++        }
++    }
++
++    /// Re-derive the distance-dependent coefficients from the current smoothed values.
++    fn update_coefs(&mut self) {
++        let d = self.dist.value();
++        self.alpha = OnePole::alpha(air_cutoff(d, self.air.value()), self.sr);
++        self.width = width_at(d);
++    }
++}
++
++impl AudioEffect for Space {
++    param_plumbing!("space");
++    fn reset(&mut self) {
++        self.rev.reset();
++        self.lines.iter_mut().for_each(DelayLine::reset);
++        self.air_lp.iter_mut().for_each(|p| p.iter_mut().for_each(OnePole::reset));
++        for s in [&mut self.dist, &mut self.air, &mut self.amount, &mut self.pan, &mut self.doppler, &mut self.out] {
++            s.snap();
++        }
++        self.counter = 0;
++        self.update_coefs();
++    }
++    fn process(&mut self, channels: &mut [&mut [f32]]) {
++        let n = block_len(channels);
++        let nch = channels.len().min(self.lines.len());
++        if nch == 0 {
++            return;
++        }
++        let mut start = 0;
++        while start < n {
++            let len = (n - start).min(CHUNK);
++            // Direct path in place; the delayed source goes to the reverb.
++            for i in 0..len {
++                let d = self.dist.tick();
++                self.air.tick();
++                let amount = self.amount.tick();
++                let pan = self.pan.tick();
++                let doppler = self.doppler.tick();
++                let out = self.out.tick();
++                if self.counter == 0 {
++                    self.update_coefs();
++                }
++                self.counter = (self.counter + 1) % COEF_EVERY;
++                let delay = doppler * d / SPEED_OF_SOUND * self.sr;
++                let g = direct_gain(d) * out;
++                for ch in 0..nch {
++                    let line = &mut self.lines[ch];
++                    line.push(channels[ch][start + i]);
++                    let x = line.read(delay);
++                    if ch < 2 {
++                        self.src[ch][i] = x;
++                    }
++                    let [a, b] = &mut self.air_lp[ch];
++                    let y = b.lp(self.alpha, a.lp(self.alpha, x));
++                    channels[ch][start + i] = y * g;
++                }
++                if nch == 1 {
++                    self.src[1][i] = self.src[0][i];
++                } else {
++                    let (l, r) = (channels[0][start + i], channels[1][start + i]);
++                    let (m, s) = (0.5 * (l + r), 0.5 * (l - r) * self.width);
++                    // balance: the far side fades out, the near side stays at unity
++                    channels[0][start + i] = (m + s) * (1.0 - pan).min(1.0);
++                    channels[1][start + i] = (m - s) * (1.0 + pan).min(1.0);
++                }
++                self.rev_g[i] = amount * reverb_falloff(d) * out;
++            }
++            let [a, b] = &mut self.src;
++            self.rev.process(&mut [&mut a[..len], &mut b[..len]]);
++            for i in 0..len {
++                let g = self.rev_g[i];
++                if nch == 1 {
++                    channels[0][start + i] += g * 0.5 * (self.src[0][i] + self.src[1][i]);
++                } else {
++                    channels[0][start + i] += g * self.src[0][i];
++                    channels[1][start + i] += g * self.src[1][i];
++                }
++            }
++            start += len;
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::testutil::*;
++
++    const SR: f32 = 48000.0;
++
++    fn space(params: &[(&str, f32)]) -> Space {
++        let mut s = Space::new(SR, 2);
++        for (p, v) in params {
++            assert!(s.set_param(p, *v), "{p}");
++        }
++        s.reset();
++        s
++    }
++
++    fn run(s: &mut Space, l: &[f32], r: &[f32]) -> (Vec<f32>, Vec<f32>) {
++        let (mut a, mut b) = (l.to_vec(), r.to_vec());
++        s.process(&mut [&mut a, &mut b]);
++        (a, b)
++    }
++
++    #[test]
++    fn dry_at_one_metre_is_identity_up_to_air() {
++        let x = sine(1000.0, 0.5, SR as f64, 9600, 0.0);
++        let mut s = space(&[("reverb", 0.0)]);
++        let (y, z) = run(&mut s, &x, &x);
++        let level = db(tone_amplitude(&y[4800..], 1000.0, SR as f64) / 0.5);
++        assert!(level.abs() < 0.1, "{level}");
++        assert_eq!(y, z);
++    }
++
++    #[test]
++    fn distance_lowers_level_and_dulls_the_sound() {
++        let tone = |f: f64, d: f32| {
++            let x = sine(f, 0.5, SR as f64, 9600, 0.0);
++            let mut s = space(&[("reverb", 0.0), ("distance", d)]);
++            let (y, _) = run(&mut s, &x, &x);
++            db(tone_amplitude(&y[4800..], f, SR as f64) / 0.5)
++        };
++        // inverse distance law on low frequencies
++        assert!((tone(200.0, 2.0) + 6.02).abs() < 0.2);
++        assert!((tone(200.0, 10.0) + 20.0).abs() < 0.3);
++        // highs fall faster than lows far away
++        let (lo, hi) = (tone(200.0, 40.0), tone(8000.0, 40.0));
++        assert!(hi < lo - 10.0, "lo {lo} hi {hi}");
++        // closer than 1 m is louder
++        assert!(tone(200.0, 0.5) > 5.5);
++    }
++
++    #[test]
++    fn far_sound_is_mostly_reverb() {
++        let mut x = vec![0.0f32; 48000];
++        x[0] = 1.0;
++        let energy = |d: f32| {
++            let mut s = space(&[("distance", d), ("space", 4.0)]);
++            let (y, _) = run(&mut s, &x, &x);
++            let direct: f64 = y[..48].iter().map(|v| (*v as f64).powi(2)).sum();
++            let tail: f64 = y[2400..].iter().map(|v| (*v as f64).powi(2)).sum();
++            (direct, tail)
++        };
++        let (near_d, near_t) = energy(1.0);
++        let (far_d, far_t) = energy(50.0);
++        assert!(near_d > near_t, "near: direct {near_d} tail {near_t}");
++        assert!(far_t > far_d, "far: direct {far_d} tail {far_t}");
++        assert!(far_t > 0.1 * near_t, "reverb falls slowly");
++    }
++
++    #[test]
++    fn bigger_spaces_ring_longer() {
++        let mut x = vec![0.0f32; 96000];
++        x[0] = 1.0;
++        let tail = |space_idx: f32| {
++            let mut s = space(&[("space", space_idx)]);
++            let (y, _) = run(&mut s, &x, &x);
++            rms(&y[48000..])
++        };
++        assert!(tail(5.0) > 10.0 * tail(1.0), "church rings longer than a small room");
++    }
++
++    #[test]
++    fn position_balances_the_direct_sound() {
++        let x = sine(500.0, 0.5, SR as f64, 9600, 0.0);
++        let mut s = space(&[("reverb", 0.0), ("pan", 100.0)]);
++        let (l, r) = run(&mut s, &x, &x);
++        assert!(rms(&l[4800..]) < 1e-6);
++        let level = db(rms(&r[4800..]) / rms(&x[4800..]));
++        assert!(level.abs() < 0.1, "{level}");
++    }
++
++    #[test]
++    fn doppler_raises_the_pitch_of_an_approaching_sound() {
++        // 1 kHz tone, distance 100 m → 0.5 m over one second: closing speed 99.5 m/s
++        let n = 48000;
++        let x = sine(1000.0, 0.5, SR as f64, n, 0.0);
++        let mut s = space(&[("reverb", 0.0), ("air", 0.0), ("doppler", 1.0), ("distance", 100.0)]);
++        let (mut a, mut b) = (x.clone(), x);
++        let block = 256;
++        for (k, (ca, cb)) in a.chunks_mut(block).zip(b.chunks_mut(block)).enumerate() {
++            let t = (k * block) as f32 / n as f32;
++            s.set_param("distance", 100.0 - 99.5 * t);
++            s.process(&mut [ca, cb]);
++        }
++        // y(t) = x(t − d(t)/c): the heard frequency is f·(1 + v/c) while the distance closes at v
++        let mid = &a[12000..36000];
++        let crossings = mid.windows(2).filter(|w| (w[0] <= 0.0) != (w[1] <= 0.0)).count();
++        let freq = crossings as f32 / 2.0 / (mid.len() as f32 / SR);
++        let expected = 1000.0 * (1.0 + 99.5 / SPEED_OF_SOUND);
++        assert!((freq - expected).abs() < 25.0, "{freq} Hz vs {expected} Hz");
++    }
++
++    #[test]
++    fn mono_and_surround_inputs_are_safe() {
++        let mut s = Space::new(SR, 6);
++        let mut chans: Vec<Vec<f32>> = (0..6).map(|c| sine(300.0 + 50.0 * c as f64, 0.3, SR as f64, 1000, 0.0)).collect();
++        let mut refs: Vec<&mut [f32]> = chans.iter_mut().map(|c| c.as_mut_slice()).collect();
++        s.process(&mut refs);
++        assert!(chans.iter().flatten().all(|v| v.is_finite()));
++        let mut m = Space::new(SR, 1);
++        let mut x = sine(300.0, 0.3, SR as f64, 1000, 0.0);
++        m.process(&mut [&mut x]);
++        assert!(x.iter().all(|v| v.is_finite()));
++    }
++}
+diff --git a/crates/project/src/effect/audio.rs b/crates/project/src/effect/audio.rs
+index 1673423..eaf673b 100644
+--- a/crates/project/src/effect/audio.rs
++++ b/crates/project/src/effect/audio.rs
+@@ -57,6 +57,8 @@ fn geq(labels: &[&'static str]) -> Vec<ParamDef> {
+ }
+ 
+ const SLOPES: &[&str] = &["12 dB/oct", "24 dB/oct", "36 dB/oct", "48 dB/oct"];
++/// Rooms of Distance & Space (same order as `filmcraft_audio_dsp::effects::spatial::SPACES`).
++const SPACES: &[&str] = &["Open Air", "Small Room", "Living Room", "Bathroom", "Concert Hall", "Church", "Cave", "Tunnel"];
+ 
+ fn peq_band(p: [&'static str; 4], name: &'static str, freq: f64, q: f64) -> Vec<ParamDef> {
+     group(name, vec![b(p[0], "On", true), hz(p[1], "Frequency", freq, 20.0, 20000.0), db(p[2], "Gain", 0.0, -30.0, 30.0), num(p[3], "Q", q, 0.1, 30.0, "", 2)])
+@@ -472,6 +474,21 @@ pub(super) fn defs() -> Vec<EffectDef> {
+                 pct("wet", "Wet", 30.0, 0.0, 100.0),
+             ],
+         ),
++        // FilmCraft's own: keyframe Distance to make a sound approach or recede
++        audio(
++            "space",
++            "Distance & Space",
++            A_REVERB,
++            vec![
++                fs("distance", "Distance", 1.0, (0.5, 100.0), (0.5, 50.0), "m", 1),
++                ch("space", "Space", SPACES, 2),
++                pct("reverb", "Reverb Amount", 100.0, 0.0, 200.0),
++                num("pan", "Position", 0.0, -100.0, 100.0, "", 0),
++                pct("air", "Air Absorption", 100.0, 0.0, 100.0),
++                b("doppler", "Doppler", false),
++                db("output", "Output Gain", 0.0, -24.0, 12.0),
++            ],
++        ),
+         // ---- Special ----
+         audio(
+             "binauralizer",
+diff --git a/crates/render/src/audio_fx.rs b/crates/render/src/audio_fx.rs
+index db84a1f..8a5404d 100644
+--- a/crates/render/src/audio_fx.rs
++++ b/crates/render/src/audio_fx.rs
+@@ -234,6 +234,7 @@ pub const DIRECT: &[(&str, &str, f64)] = &[
+     ("multitap_delay", "multitap_delay", 0.0),
+     ("convolution_reverb", "convolution_reverb", 0.0),
+     ("surround_reverb", "surround_reverb", 0.0),
++    ("space", "space", 3.0),
+ ];
+ 
+ /// Pre-roll of a direct mapping: its own tail, and at least long enough for the DSP's
+diff --git a/crates/ui-egui/src/i18n/es.tsv b/crates/ui-egui/src/i18n/es.tsv
+index 25a2348..8145872 100644
+--- a/crates/ui-egui/src/i18n/es.tsv
++++ b/crates/ui-egui/src/i18n/es.tsv
+@@ -3592,3 +3592,14 @@
+ 	Export the labels to a preset file…	Exportar las etiquetas a un archivo de ajuste preestablecido…
+ 	Show the presets folder	Mostrar la carpeta de ajustes preestablecidos
+ 	Delete this preset	Eliminar este ajuste preestablecido
++# Distance & Space (audio effect)
++	Distance & Space	Distancia y espacio
++	Space	Espacio
++	Living Room	Sala de estar
++	Bathroom	Baño
++	Concert Hall	Sala de conciertos
++	Church	Iglesia
++	Cave	Cueva
++	Tunnel	Túnel
++	Air Absorption	Absorción del aire
++	Doppler	Doppler
+diff --git a/crates/ui-egui/src/i18n/ja.tsv b/crates/ui-egui/src/i18n/ja.tsv
+index 13673e6..2f6add5 100644
+--- a/crates/ui-egui/src/i18n/ja.tsv
++++ b/crates/ui-egui/src/i18n/ja.tsv
+@@ -3594,3 +3594,14 @@
+ 	Export the labels to a preset file…	ラベルをプリセットファイルに書き出し…
+ 	Show the presets folder	プリセットフォルダーを表示
+ 	Delete this preset	このプリセットを削除
++# Distance & Space (audio effect)
++	Distance & Space	距離と空間
++	Space	空間
++	Living Room	リビングルーム
++	Bathroom	バスルーム
++	Concert Hall	コンサートホール
++	Church	教会
++	Cave	洞窟
++	Tunnel	トンネル
++	Air Absorption	空気吸収
++	Doppler	ドップラー

@@ -1,0 +1,2 @@
+*.patch -text
+*.ps1 text eol=crlf
