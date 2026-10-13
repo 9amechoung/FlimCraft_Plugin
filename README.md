@@ -9,6 +9,7 @@ FilmCraft에는 플러그인 API가 없어서, 이 저장소의 패치를 FilmCr
 |---|---|
 | `0001-distance-and-space-audio-effect.patch` | 오디오 효과 **Distance & Space**(거리와 공간) |
 | `0002-project-panel-image-sequence-import.patch` | Project 패널에서 바로 **이미지 시퀀스 불러오기**(우클릭·Alt+더블클릭·버튼·단축키) |
+| `0003-image-sequence-frame-rate.patch` | 이미지 시퀀스를 불러올 때 **프레임레이트 고르기**(빨리감기처럼 보이는 문제 해결) |
 
 기준 FilmCraft 버전: `FILMCRAFT_COMMIT` (0.7.2, `71438c6`)
 
@@ -51,7 +52,31 @@ Distance, Reverb Amount, Position, Air Absorption, Output Gain은 키프레임�
 
 - 파일 창에서는 **첫 프레임 하나만** 고르거나 **Ctrl+A로 전부** 골라도 됩니다. 고른 것 중 번호가 가장 작은 프레임부터 시퀀스가 만들어집니다.
 - 지금 패널에 열려 있는 빈(폴더)으로 들어갑니다.
+- 파일을 고르면 **프레임레이트 창**이 뜹니다(0003). 아래 내용을 보세요.
 - 그냥 더블클릭으로 연 일반 Import 창에서도 시퀀스로 받고 싶다면 **Settings ▸ Media ▸ Import numbered stills as image sequences**를 켜세요. 번호 붙은 이미지 하나를 고르면 시퀀스로 들어옵니다(원래 FilmCraft 기능).
+
+### 프레임레이트 정하기(0003)
+
+이미지 파일에는 프레임레이트 정보가 없습니다. 그래서 원래 FilmCraft는 시퀀스를 늘 **Settings ▸ Media ▸ Indeterminate Media Timebase** 값(기본 29.97 fps)으로 재생했습니다.
+12 fps 애니메이션이나 24 fps 렌더 이미지를 불러오면, 원래보다 빨리 재생돼 **빨리감기처럼** 보였습니다.
+
+이 패치를 쓰면 Import Image Sequence…에서 프레임을 고른 뒤 **Import Image Sequence** 창이 뜹니다.
+
+| 항목 | 하는 일 |
+|---|---|
+| 파일 이름 · 프레임 수 | 들어올 시퀀스를 보여 줍니다 |
+| **Frame Rate** 숫자 칸 | 1–240 fps 사이 아무 값이나 넣습니다(끌거나 더블클릭해서 입력) |
+| 빠른 선택 버튼 | 8 · 10 · 12 · 12.5 · 15 · 23.976 · 24 · 25 · 29.97 · 30 · 48 · 50 · 59.94 · 60 |
+| **Duration** | 고른 프레임레이트로 재생하면 몇 초인지 보여 줍니다 |
+| **OK** / **Cancel** | OK를 누르면 그 프레임레이트로 불러오고, Cancel이나 Esc를 누르면 불러오지 않습니다 |
+
+- 처음에는 Indeterminate Media Timebase 값으로 시작합니다. 그다음부터는 **마지막으로 고른 값**으로 시작합니다(앱을 다시 켜면 처음 값으로 돌아감).
+- 고른 프레임레이트는 클립에 저장됩니다. 프로젝트를 저장했다가 다시 열어도 그대로 유지됩니다.
+- 시퀀스를 30 fps로 편집하면서 12 fps 이미지를 쓰는 것처럼 타임라인과 프레임레이트가 달라도 됩니다. 길이(초)는 그대로 맞고, 각 그림이 여러 프레임 동안 보입니다.
+- 이미 불러온 시퀀스의 속도는 바꿀 수 없습니다. 다시 불러오세요.
+- Media Browser나 일반 Import 창의 자동 시퀀스 인식(위 설정)은 지금처럼 Indeterminate Media Timebase를 씁니다. 이 경로에 자주 쓰는 값이 있으면 그 설정을 바꿔 두세요.
+- CinemaDNG처럼 파일 안에 프레임레이트가 적혀 있으면 그 값이 우선합니다.
+- 자동화(engine 명령): `file.importImageSequence {"path": "...", "frameRate": 12}`. `file.import`에서도 `imageSequence: true`와 함께 `frameRate`를 쓸 수 있습니다.
 
 ## 설치(터미널 한 줄)
 
@@ -100,4 +125,5 @@ irm https://raw.githubusercontent.com/9amechoung/FlimCraft_Plugin/main/install.p
 - DSP: `crates/audio-dsp/src/effects/spatial.rs`의 `Space` 효과입니다. 기존 8×8 FDN `Reverb`를 그대로 씁니다. 직접음은 거리 역제곱 감쇠, 2단 one-pole 저역통과(공기 흡수), 거리에 따른 M/S 폭 축소를 거칩니다. 도플러는 분수 지연선입니다. 울림은 거리에 따라 직접음보다 훨씬 천천히 줄어서(100 m에서 −8 dB), 먼 소리일수록 울림 비중이 커집니다.
 - 등록 위치: DSP 레지스트리(`effects/mod.rs`), 프로젝트 효과 정의(`project/src/effect/audio.rs`, id `space`), 렌더 매핑(`render/src/audio_fx.rs`의 `DIRECT`, 프리롤 3초), 스페인어·일본어 UI 번역(`ui-egui/src/i18n/*.tsv`).
 - 이미지 시퀀스(0002): 명령 `file.importImageSequence`에 기본 단축키(`engine/src/project_tools.rs`)를 주고, Project 패널의 빈 곳 메뉴·더블클릭(`ui-egui/src/panels/project_views.rs`)과 하단 버튼(`panels/project.rs`)에서 부릅니다. 파일 창 처리(`ui-egui/src/lib.rs`의 `file_dialog`)는 보이는 빈을 기본값으로 쓰고, 여러 프레임을 고르면 번호가 가장 작은 것부터 시작합니다(`first_numbered_frame`).
+- 프레임레이트(0003): 엔진 `file.import`·`file.importImageSequence`가 `frameRate`(숫자 또는 `"23.976"` 같은 문자열, 1–240)를 받아 `import_image_sequence`(`engine/src/commands.rs`)에 넘깁니다. 미디어 항목의 프레임레이트로 저장되므로 프로젝트를 다시 열어도 유지됩니다(`media_pool.rs`가 `m.info.frame_rate()`로 다시 엽니다). UI는 파일 창 다음에 `ui-egui/src/panels/image_sequence_dialog.rs` 창을 띄웁니다. `frameRate`를 함께 주면 창 없이 바로 불러옵니다.
 - 패치를 새로 만들려면: `install.ps1 -NoRun`으로 기존 패치가 적용된 `flimcraft-plugin` 브랜치에서 수정한 뒤 `git diff HEAD > patches/000N-이름.patch`(기존 패치 위의 차이만), 그리고 `patches/series`에 파일 이름을 한 줄 추가합니다.

@@ -45,10 +45,11 @@ jobs:
         working-directory: ../filmcraft
         run: cargo test -p filmcraft-audio-dsp -p filmcraft-project -p filmcraft-render
 
-      - name: Tests (0002 image sequence import)
+      - name: Tests (0002 image sequence import, 0003 frame rate)
         working-directory: ../filmcraft
         run: |
           cargo test -p filmcraft-engine --lib project_tools
+          cargo test -p filmcraft-engine --lib image_sequence
           cargo test -p filmcraft-ui-egui --lib first_numbered_frame
           cargo test -p filmcraft-ui-egui --test project_panel_ui
 
