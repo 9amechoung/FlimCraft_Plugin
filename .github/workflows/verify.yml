@@ -1,0 +1,44 @@
+# Applies patches/ to FilmCraft (FILMCRAFT_COMMIT) with install.ps1, then checks formatting,
+# clippy and the tests of the crates the patches touch. Runs on every push and pull request,
+# and by hand from the Actions tab.
+name: Verify patches
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Clone FilmCraft and apply the patches
+        shell: pwsh
+        run: ./install.ps1 -Target ../filmcraft -NoRun
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ../filmcraft
+
+      - name: Format
+        working-directory: ../filmcraft
+        run: cargo fmt --check -p filmcraft-audio-dsp -p filmcraft-project -p filmcraft-render
+
+      - name: Clippy
+        working-directory: ../filmcraft
+        run: cargo clippy -p filmcraft-audio-dsp -p filmcraft-project -p filmcraft-render --all-targets -- -D warnings
+
+      - name: Tests
+        working-directory: ../filmcraft
+        run: cargo test -p filmcraft-audio-dsp -p filmcraft-project -p filmcraft-render
+
+      - name: UI translations
+        working-directory: ../filmcraft
+        run: cargo test -p filmcraft-ui-egui --lib i18n

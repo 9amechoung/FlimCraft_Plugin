@@ -19,7 +19,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repoRaw = 'https://raw.githubusercontent.com/9amechoung/FlimCraft_Plugin/main'
-$Target = [System.IO.Path]::GetFullPath($Target)
+# relative to the PowerShell location (Windows PowerShell's cd doesn't move the process folder)
+$Target = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Target)
 $safe = $Target -replace '\\', '/'
 
 # git in the FilmCraft folder. safe.directory is passed per command because drives that don't

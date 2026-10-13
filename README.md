@@ -1,5 +1,7 @@
 # FlimCraft_Plugin
 
+[![Verify patches](https://github.com/9amechoung/FlimCraft_Plugin/actions/workflows/verify.yml/badge.svg)](https://github.com/9amechoung/FlimCraft_Plugin/actions/workflows/verify.yml)
+
 [FilmCraft](https://github.com/storytold/filmcraft)(오픈소스 Rust 영상 편집기)에 기능을 더하는 패치 모음입니다.
 FilmCraft에는 플러그인 API가 없어서, 이 저장소의 패치를 FilmCraft 소스에 적용한 뒤 빌드하는 방식입니다.
 
@@ -61,7 +63,18 @@ irm https://raw.githubusercontent.com/9amechoung/FlimCraft_Plugin/main/install.p
 
 이 저장소를 클론했다면 `powershell -ExecutionPolicy Bypass -File .\install.ps1`로 로컬 패치를 씁니다.
 
-> 상태: 패치는 FilmCraft 0.7.2에 적용되는 것까지 확인했고, 빌드·테스트 검증은 진행 중입니다.
+## GitHub에서만 작업하기
+
+로컬 클론 없이 GitHub만으로 관리할 수 있습니다.
+
+- **자동 검증**: 푸시나 PR이 올라올 때마다 GitHub Actions(`.github/workflows/verify.yml`)가 Windows에서 다음을 실행합니다. 결과는 저장소의 **Actions** 탭에서 확인합니다.
+  1. FilmCraft를 받아 패치를 적용합니다.
+  2. 포맷과 clippy 검사를 합니다.
+  3. 테스트와 UI 번역 검사를 돌립니다.
+- **수동 실행**: Actions ▸ Verify patches ▸ **Run workflow**
+- **문서나 설정 수정**: github.com에서 파일을 열고 연필 아이콘으로 편집해 커밋하면, 검증이 자동으로 돕니다.
+- **패치 내용 수정**: 패치 파일은 FilmCraft 소스와의 차이(diff)라서 웹에서 직접 고치기 어렵습니다. 저장소 페이지의 **Code ▸ Codespaces**로 브라우저 안 개발 환경을 열면, 로컬 설치 없이 `install.ps1 -NoRun`으로 패치를 적용해 수정하고 다시 패치로 저장할 수 있습니다.
+- **설치**: 위의 한 줄 명령은 항상 GitHub의 `main` 브랜치에서 받아오므로, 로컬 폴더가 없어도 됩니다.
 
 ## 동작 원리(개발자용)
 
