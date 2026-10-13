@@ -38,7 +38,9 @@ Distance, Reverb Amount, Position, Air Absorption, Output Gain은 키프레임�
 
 필요한 것: Git, [Rust](https://rustup.rs) 1.95 이상, Visual Studio C++ 빌드 도구(Windows).
 
-FilmCraft를 둘 폴더로 이동한 뒤(예: `cd D:\10_AiSt`), PowerShell에 붙여 넣으세요.
+FilmCraft 소스를 둘 폴더로 이동한 뒤(예: `cd C:\Dev`), PowerShell에 붙여 넣으세요.
+
+> `C:\Program Files\FilmCraft`처럼 설치 프로그램으로 깐 FilmCraft에는 패치를 적용할 수 없습니다. 패치는 FilmCraft **소스 코드**에 적용해 새로 빌드하는 방식이라, 소스를 따로 내려받습니다. `Program Files`는 관리자 권한이 필요하니 소스 폴더로 쓰지 마세요. 기존에 설치한 FilmCraft는 그대로 두어도 됩니다.
 
 ```powershell
 irm https://raw.githubusercontent.com/9amechoung/FlimCraft_Plugin/main/install.ps1 | iex
@@ -57,7 +59,7 @@ irm https://raw.githubusercontent.com/9amechoung/FlimCraft_Plugin/main/install.p
 
 - `-Test`: 실행 전에 패치 관련 테스트를 돌립니다(`audio-dsp`, `project`, `render` 크레이트).
 - `-NoRun`: 패치만 적용하고 빌드하지 않습니다.
-- `-Target D:\경로\filmcraft`: 다른 FilmCraft 폴더를 씁니다. 커밋하지 않은 변경이 있으면 멈춥니다.
+- `-Target C:\경로\filmcraft`: 다른 FilmCraft 폴더를 씁니다. 커밋하지 않은 변경이 있으면 멈춥니다.
 
 이 저장소를 클론했다면 `powershell -ExecutionPolicy Bypass -File .\install.ps1`로 로컬 패치를 씁니다.
 

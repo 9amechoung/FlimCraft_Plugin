@@ -5,7 +5,7 @@
 # With options:
 #   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/9amechoung/FlimCraft_Plugin/main/install.ps1))) -Test
 # From a clone of this repo (uses the local patches):
-#   powershell -ExecutionPolicy Bypass -File .\install.ps1 [-Test] [-NoRun] [-Target D:\path\filmcraft]
+#   powershell -ExecutionPolicy Bypass -File .\install.ps1 [-Test] [-NoRun] [-Target C:\path\filmcraft]
 #
 #   -Target  FilmCraft folder (default: .\filmcraft in the current folder)
 #   -Test    run the patch's tests before starting
